@@ -56,6 +56,12 @@ const (
 )
 
 const (
+	prioDeploymentConditions = 50500 + iota
+	prioDeploymentReplicas
+	prioDeploymentAge
+)
+
+const (
 	labelKeyPrefix = "k8s_"
 	//labelKeyLabelPrefix      = labelKeyPrefix + "label_"
 	//labelKeyAnnotationPrefix = labelKeyPrefix + "annotation_"
@@ -71,6 +77,7 @@ const (
 	labelKeyContainerName  = labelKeyPrefix + "container_name"
 	labelKeyContainerID    = labelKeyPrefix + "container_id"
 	labelKeyQoSClass       = labelKeyPrefix + "qos_class"
+	labelKeyDeploymentName = labelKeyPrefix + "deployment_name"
 )
 
 var baseCharts = module.Charts{
@@ -120,6 +127,12 @@ var containerChartsTmpl = module.Charts{
 	containersStateChartTmpl.Copy(),
 	containersStateWaitingChartTmpl.Copy(),
 	containersStateTerminatedChartTmpl.Copy(),
+}
+
+var deploymentChartsTmpl = module.Charts{
+	deploymentConditionStatusChartTmpl.Copy(),
+	deploymentReplicasChartTmpl.Copy(),
+	deploymentAgeChartTmpl.Copy(),
 }
 
 var (
@@ -429,12 +442,7 @@ func (c *Collector) addNodeCharts(ns *nodeState) {
 
 func (c *Collector) removeNodeCharts(ns *nodeState) {
 	prefix := fmt.Sprintf("node_%s", replaceDots(ns.id()))
-	for _, c := range *c.Charts() {
-		if strings.HasPrefix(c.ID, prefix) {
-			c.MarkRemove()
-			c.MarkNotCreated()
-		}
-	}
+	c.removeCharts(prefix)
 }
 
 var (
@@ -645,12 +653,7 @@ func updateNodeLabel(c *module.Chart, nodeName string) {
 
 func (c *Collector) removePodCharts(ps *podState) {
 	prefix := fmt.Sprintf("pod_%s", replaceDots(ps.id()))
-	for _, c := range *c.Charts() {
-		if strings.HasPrefix(c.ID, prefix) {
-			c.MarkRemove()
-			c.MarkNotCreated()
-		}
-	}
+	c.removeCharts(prefix)
 }
 
 var (
@@ -754,6 +757,84 @@ func (c *Collector) addContainerCharts(ps *podState, cs *containerState) {
 	charts := c.newContainerCharts(ps, cs)
 	if err := c.Charts().Add(*charts...); err != nil {
 		c.Warning(err)
+	}
+}
+
+var (
+	deploymentConditionStatusChartTmpl = module.Chart{
+		IDSep:    true,
+		ID:       "deployment_%s.conditions",
+		Title:    "Deployment Conditions",
+		Units:    "status",
+		Fam:      "deployment conditions",
+		Ctx:      "k8s_state.deployment_conditions",
+		Priority: prioDeploymentConditions,
+		Dims: module.Dims{
+			{ID: "deploy_%s_condition_available", Name: "available"},
+			{ID: "deploy_%s_condition_replica_failure", Name: "replica_failure"},
+			{ID: "deploy_%s_condition_progressing", Name: "progressing"},
+		},
+	}
+	deploymentReplicasChartTmpl = module.Chart{
+		IDSep:    true,
+		ID:       "deployment_%s.replicas",
+		Title:    "Deployment Replicas",
+		Units:    "replicas",
+		Fam:      "deployment replicas",
+		Ctx:      "k8s_state.deployment_replicas",
+		Priority: prioDeploymentReplicas,
+		Dims: module.Dims{
+			{ID: "deploy_%s_desired_replicas", Name: "desired"},
+			{ID: "deploy_%s_current_replicas", Name: "current"},
+			{ID: "deploy_%s_ready_replicas", Name: "ready"},
+		},
+	}
+	deploymentAgeChartTmpl = module.Chart{
+		IDSep:    true,
+		ID:       "deployment_%s.age",
+		Title:    "Deployment Age",
+		Units:    "seconds",
+		Fam:      "deployment age",
+		Ctx:      "k8s_state.deployment_age",
+		Priority: prioDeploymentAge,
+		Dims: module.Dims{
+			{ID: "deploy_%s_age", Name: "age"},
+		},
+	}
+)
+
+func (c *Collector) addDeploymentCharts(rs *deploymentState) {
+	charts := deploymentChartsTmpl.Copy()
+
+	for _, chart := range *charts {
+		chart.ID = fmt.Sprintf(chart.ID, replaceDots(rs.id()))
+		chart.Labels = []module.Label{
+			{Key: labelKeyClusterID, Value: c.kubeClusterID, Source: module.LabelSourceK8s},
+			{Key: labelKeyClusterName, Value: c.kubeClusterName, Source: module.LabelSourceK8s},
+			{Key: labelKeyDeploymentName, Value: rs.name, Source: module.LabelSourceK8s},
+			{Key: labelKeyNamespace, Value: rs.namespace, Source: module.LabelSourceK8s},
+		}
+		for _, d := range chart.Dims {
+			d.ID = fmt.Sprintf(d.ID, rs.id())
+		}
+	}
+
+	if err := c.Charts().Add(*charts...); err != nil {
+		c.Warning(err)
+	}
+}
+
+func (c *Collector) removeDeploymentCharts(rs *deploymentState) {
+	prefix := fmt.Sprintf("deployment_%s", replaceDots(rs.id()))
+	c.removeCharts(prefix)
+}
+
+func (c *Collector) removeCharts(prefix string) {
+	for _, c := range *c.Charts() {
+		if strings.HasPrefix(c.ID, prefix) {
+			c.MarkRemove()
+			c.MarkNotCreated()
+		}
 	}
 }
 

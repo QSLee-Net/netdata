@@ -5,13 +5,15 @@ package k8s_state
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/netdata/netdata/go/plugins/plugin/go.d/agent/module"
 	"github.com/netdata/netdata/go/plugins/plugin/go.d/pkg/metrix"
-
-	corev1 "k8s.io/api/core/v1"
 )
 
 const precision = 1000
@@ -107,6 +109,7 @@ func (c *Collector) collectKubeState(mx map[string]int64) {
 	}
 	c.collectPodsState(mx)
 	c.collectNodesState(mx)
+	c.collectDeploymentState(mx)
 }
 
 func (c *Collector) collectPodsState(mx map[string]int64) {
@@ -308,17 +311,50 @@ func (c *Collector) collectNodesState(mx map[string]int64) {
 	}
 }
 
+func (c *Collector) collectDeploymentState(mx map[string]int64) {
+	now := time.Now()
+
+	maps.DeleteFunc(c.state.deployments, func(s string, ds *deploymentState) bool {
+		if ds.deleted {
+			c.removeDeploymentCharts(ds)
+			return true
+		}
+
+		if ds.new {
+			ds.new = false
+			c.addDeploymentCharts(ds)
+		}
+
+		px := fmt.Sprintf("deploy_%s_", ds.id())
+
+		mx[px+"age"] = int64(now.Sub(ds.creationTime).Seconds())
+		mx[px+"desired_replicas"] = ds.replicas
+		mx[px+"current_replicas"] = ds.availableReplicas
+		mx[px+"ready_replicas"] = ds.readyReplicas
+
+		mx[px+"condition_available"] = 0
+		mx[px+"condition_progressing"] = 0
+		mx[px+"condition_replica_failure"] = 0
+
+		for _, cond := range ds.conditions {
+			v := metrix.Bool(cond.Status == corev1.ConditionTrue)
+			switch cond.Type {
+			case appsv1.DeploymentAvailable:
+				// https://github.com/kubernetes/kubernetes/blob/2b3da7dfc846fec7c4044a320f8f38b4a45367a3/pkg/controller/deployment/sync.go#L518-L525
+				mx[px+"condition_available"] = v
+			case appsv1.DeploymentProgressing:
+				mx[px+"condition_available"] = v
+			case appsv1.DeploymentReplicaFailure:
+				mx[px+"condition_replica_failure"] = v
+			}
+		}
+
+		return false
+	})
+}
+
 func condStatusToInt(cs corev1.ConditionStatus) int64 {
-	switch cs {
-	case corev1.ConditionFalse:
-		return 0
-	case corev1.ConditionTrue:
-		return 1
-	case corev1.ConditionUnknown:
-		return 0
-	default:
-		return 0
-	}
+	return metrix.Bool(cs == corev1.ConditionTrue)
 }
 
 func calcPercentage(value, total int64) int64 {
